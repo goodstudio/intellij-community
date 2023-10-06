@@ -116,15 +116,24 @@ fun StackFrame.computeKotlinStackFrameInfos(): List<KotlinStackFrameInfo> {
     }
 
     val stackFrameInfos = if (shouldComputeStackFrameInfosUsingTheOldScheme(allVisibleVariables)) {
-        computeStackFrameInfos(allVisibleVariables)
+        computeStackFrameInfosWithCallLocations(location, method, allVisibleVariables)
     } else {
-        computeStackFrameInfosUsingScopeNumbers(allVisibleVariables).ifEmpty {
-            computeStackFrameInfos(allVisibleVariables)
+        computeStackFrameInfosUsingScopeNumbers(location, method, allVisibleVariables).ifEmpty {
+            computeStackFrameInfosWithCallLocations(location, method, allVisibleVariables)
         }
     }
-    fetchCallLocations(method, stackFrameInfos, location)
     return stackFrameInfos
 }
+
+private fun computeStackFrameInfosWithCallLocations(
+    location: Location,
+    method: Method,
+    allVisibleVariables: List<VariableWithLocation>
+): List<KotlinStackFrameInfo> =
+    computeStackFrameInfos(allVisibleVariables).also {
+        fetchCallLocations(method, it, location)
+    }
+
 
 // Constructs a list of inline stack frames from a list of currently visible variables
 // in introduction order.
@@ -257,14 +266,18 @@ private fun computeStackFrameInfos(sortedVariables: List<VariableWithLocation>):
     return stackFrameInfos
 }
 
-private fun computeStackFrameInfosUsingScopeNumbers(sortedVariables: List<VariableWithLocation>): List<KotlinStackFrameInfo> {
+private fun computeStackFrameInfosUsingScopeNumbers(
+    location: Location,
+    method: Method,
+    sortedVariables: List<VariableWithLocation>
+): List<KotlinStackFrameInfo> {
     val firstFrameVariables = mutableListOf<VariableWithLocation>()
-    val stackFrameInfos = mutableListOf(KotlinStackFrameInfo(null, null, firstFrameVariables, 0))
+    val firstFrameInfo = KotlinStackFrameInfo(null, null, firstFrameVariables, 0)
+    val stackFrameInfos = mutableListOf(firstFrameInfo)
+
     val scopeNumberToVariables = mutableMapOf<Int, MutableList<VariableWithLocation>>()
-    val scopeNumberToFrameInfo = mutableMapOf<Int, KotlinStackFrameInfo>()
-    val infosAndSurroundingScopeIds = mutableListOf<Pair<KotlinStackFrameInfo, Int>>()
     for (variable in sortedVariables) {
-        val scopeNumber = variable.name.getScopeNumber()
+        val scopeNumber = variable.name.getInlineScopeInfo()?.scopeNumber
         if (scopeNumber != null) {
             scopeNumberToVariables.getOrPut(scopeNumber) { mutableListOf() }.add(variable)
         } else {
@@ -272,47 +285,41 @@ private fun computeStackFrameInfosUsingScopeNumbers(sortedVariables: List<Variab
         }
     }
 
-    scopeNumberToFrameInfo[0] = stackFrameInfos.first()
+    val lineNumberToLocation = DebuggerUtilsEx.allLineLocations(method).orEmpty()
+        .associateBy { it.lineNumber("Java") }
+
+    val callSiteLocations = mutableListOf<Location?>()
+    val infosAndSurroundingScopeIds = mutableListOf<Pair<KotlinStackFrameInfo, Int>>()
+    val scopeNumberToFrameInfo = mutableMapOf<Int, KotlinStackFrameInfo>()
+    scopeNumberToFrameInfo[0] = firstFrameInfo
+
     for (variable in sortedVariables) {
         val name = variable.name
-        if (name.isInlineFunctionMarkerVariableName) {
-            val scopeNumber = name.getScopeNumber() ?: return emptyList()
-            val frameInfo = KotlinStackFrameInfo(
-                variable,
-                null,
-                scopeNumberToVariables[scopeNumber] ?: mutableListOf(),
-                -1
-            )
-            frameInfo.inlineScopeNumber = scopeNumber
-            stackFrameInfos += frameInfo
-            scopeNumberToFrameInfo[scopeNumber] = frameInfo
-        } else if (name.isInlineLambdaMarkerVariableName) {
-            val scopeNumber = name.getScopeNumber() ?: return emptyList()
-            val surroundingScopeNumber = name.getSurroundingScopeNumber()
-            val enclosingStackFrame =
-                if (surroundingScopeNumber == null) {
-                    stackFrameInfos.first()
-                } else {
-                    // Will be assigned later
-                    null
-                }
+        if (!isFakeLocalVariableForInline(name)) {
+            continue
+        }
 
-            val frameInfo = KotlinStackFrameInfo(
-                variable,
-                enclosingStackFrame,
-                scopeNumberToVariables[scopeNumber] ?: mutableListOf(),
-                -1
-            )
-            frameInfo.inlineScopeNumber = scopeNumber
+        val (scopeNumber, callSiteLineNumber, surroundingScopeNumber) = name.getInlineScopeInfo() ?: return emptyList()
+        val frameInfo = KotlinStackFrameInfo(
+            variable,
+            null,
+            scopeNumberToVariables[scopeNumber] ?: mutableListOf(),
+            -1
+        ).apply { inlineScopeNumber = scopeNumber }
+
+        if (name.isInlineLambdaMarkerVariableName) {
             frameInfo.surroundingScopeNumber = surroundingScopeNumber ?: -1
 
             if (surroundingScopeNumber != null) {
                 infosAndSurroundingScopeIds.add(Pair(frameInfo, surroundingScopeNumber))
+            } else {
+                frameInfo.enclosingStackFrame = stackFrameInfos.first()
             }
-
-            stackFrameInfos += frameInfo
-            scopeNumberToFrameInfo[scopeNumber] = frameInfo
         }
+
+        scopeNumberToFrameInfo[scopeNumber] = frameInfo
+        callSiteLocations += lineNumberToLocation[callSiteLineNumber]
+        stackFrameInfos += frameInfo
     }
 
     // We may encounter a lambda before its surrounding lambda or function,
@@ -320,6 +327,11 @@ private fun computeStackFrameInfosUsingScopeNumbers(sortedVariables: List<Variab
     // processing.
     for ((info, id) in infosAndSurroundingScopeIds) {
         info.enclosingStackFrame = scopeNumberToFrameInfo[id]
+    }
+
+    callSiteLocations += location
+    for ((callSiteLocation, frameInfo) in callSiteLocations.zip(stackFrameInfos)) {
+        frameInfo.callLocation = callSiteLocation
     }
 
     return stackFrameInfos
@@ -471,5 +483,5 @@ private fun fetchCallLocations(
 private fun shouldComputeStackFrameInfosUsingTheOldScheme(variables: List<VariableWithLocation>): Boolean =
     variables.any {
         val name = it.name
-        isFakeLocalVariableForInline(name) && name.getScopeNumber() == null
+        isFakeLocalVariableForInline(name) && name.getInlineScopeInfo() == null
     }

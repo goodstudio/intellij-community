@@ -1776,6 +1776,11 @@ public abstract class IrKotlinEvaluateExpressionWithIRFragmentCompilerTestGenera
                 runTest("testData/evaluation/multipleBreakpoints/initializer.kt");
             }
 
+            @TestMetadata("inlineFunctionWithDefaultArguments.kt")
+            public void testInlineFunctionWithDefaultArguments() throws Exception {
+                runTest("testData/evaluation/multipleBreakpoints/inlineFunctionWithDefaultArguments.kt");
+            }
+
             @TestMetadata("inlineFunctionsInClass.kt")
             public void testInlineFunctionsInClass() throws Exception {
                 runTest("testData/evaluation/multipleBreakpoints/inlineFunctionsInClass.kt");
@@ -1866,9 +1871,29 @@ public abstract class IrKotlinEvaluateExpressionWithIRFragmentCompilerTestGenera
                 runTest("testData/evaluation/multipleBreakpoints/nestedInlineFunctions3.kt");
             }
 
+            @TestMetadata("nestedInlineFunctions4.kt")
+            public void testNestedInlineFunctions4() throws Exception {
+                runTest("testData/evaluation/multipleBreakpoints/nestedInlineFunctions4.kt");
+            }
+
+            @TestMetadata("nestedInlineFunctions5.kt")
+            public void testNestedInlineFunctions5() throws Exception {
+                runTest("testData/evaluation/multipleBreakpoints/nestedInlineFunctions5.kt");
+            }
+
+            @TestMetadata("nestedInlineFunctions6.kt")
+            public void testNestedInlineFunctions6() throws Exception {
+                runTest("testData/evaluation/multipleBreakpoints/nestedInlineFunctions6.kt");
+            }
+
             @TestMetadata("nestedInlineLambdas.kt")
             public void testNestedInlineLambdas() throws Exception {
                 runTest("testData/evaluation/multipleBreakpoints/nestedInlineLambdas.kt");
+            }
+
+            @TestMetadata("nestedInlineLambdasAndVariablesWithSameName.kt")
+            public void testNestedInlineLambdasAndVariablesWithSameName() throws Exception {
+                runTest("testData/evaluation/multipleBreakpoints/nestedInlineLambdasAndVariablesWithSameName.kt");
             }
 
             @TestMetadata("nestedInliningInAnonymousObjects.kt")

@@ -240,7 +240,7 @@ class VariableFinder(val context: ExecutionContext) {
                 variables.namedEntitySequence()
                     .filter {
                         val name = it.name
-                        val variableScopeNumber = name.getScopeNumber() ?: return@filter false
+                        val variableScopeNumber = name.getInlineScopeInfo()?.scopeNumber ?: return@filter false
                         (variableScopeNumber == scopeNumber || variableScopeNumber == frameProxy.surroundingScopeNumber) &&
                                 name.dropInlineScopeInfo().matches(INLINED_THIS_REGEX) &&
                                 kind.typeMatches(it.type)
@@ -308,12 +308,8 @@ class VariableFinder(val context: ExecutionContext) {
         if (frameProxy is InlineStackFrameProxyImpl) {
             val scopeNumber = frameProxy.inlineScopeNumber
             if (scopeNumber >= 0) {
-                findLocalVariableByScopeNumber(variables, kind, scopeNumber, namePredicate)?.let { return it }
-            }
-
-            val surroundingScopeNumber = frameProxy.surroundingScopeNumber
-            if (surroundingScopeNumber >= 0) {
-                findLocalVariableByScopeNumber(variables, kind, surroundingScopeNumber, namePredicate)?.let { return it }
+                val parentScopeNumbers = collectParentScopeNumbers(variables, scopeNumber)
+                findLocalVariableByScopeNumber(variables, kind, parentScopeNumbers, namePredicate)?.let { return it }
             }
         }
 
@@ -328,19 +324,45 @@ class VariableFinder(val context: ExecutionContext) {
         return null
     }
 
+    private fun collectParentScopeNumbers(variables: List<LocalVariableProxyImpl>, scopeNumber: Int): Set<Int> {
+        val scopeNumberToSurroundingScopeNumber = mutableMapOf<Int, Int>()
+        for (variable in variables) {
+            val name = variable.name()
+            if (isFakeLocalVariableForInline(name)) {
+                val (scope, _, surroundingScope) = name.getInlineScopeInfo() ?: continue
+                if (surroundingScope != null && scope >= 0 && surroundingScope >= 0) {
+                    scopeNumberToSurroundingScopeNumber[scope] = surroundingScope
+                }
+            }
+        }
+
+        val result = mutableSetOf<Int>()
+        var currentScopeNumber: Int? = scopeNumber
+        while (currentScopeNumber != null) {
+            result += currentScopeNumber
+            currentScopeNumber = scopeNumberToSurroundingScopeNumber[currentScopeNumber]
+        }
+        return result
+    }
+
     private fun findLocalVariableByScopeNumber(
         variables: List<LocalVariableProxyImpl>,
         kind: VariableKind,
-        scopeNumber: Int,
+        scopeNumbers: Set<Int>,
         namePredicate: (String) -> Boolean
     ): Result? {
-        return findLocalVariable(variables, kind, 0) { name ->
-            val scope = name.getScopeNumber()
+        val namedEntities = variables.namedEntitySequence() + getCoroutineStackFrameNamedEntities()
+        // When searching for variables, we are always interested in variables with a larger scope number first,
+        // This way we are prioritising variables that come from the scope we are currently in, and then its parent
+        // scopes accordingly.
+        val sortedEntities = namedEntities.sortedByDescending { it.name.getInlineScopeInfo()?.scopeNumber ?: 0 }
+        return findLocalVariable(sortedEntities, kind) { name ->
+            val scope = name.getInlineScopeInfo()?.scopeNumber
             when (scope) {
                 // If the scope number is null, then the variable belongs to the top frame.
                 // Top frame variables are always captured by inline lambdas.
                 null -> namePredicate(name)
-                scopeNumber -> namePredicate(name.dropInlineScopeInfo())
+                in scopeNumbers -> namePredicate(name.dropInlineScopeInfo())
                 else -> false
             }
         }
@@ -376,8 +398,16 @@ class VariableFinder(val context: ExecutionContext) {
         }
 
         val namedEntities = variables.namedEntitySequence() + getCoroutineStackFrameNamedEntities()
+        return findLocalVariable(namedEntities, kind, actualPredicate)
+    }
+
+    private fun findLocalVariable(
+        namedEntities: Sequence<NamedEntity>,
+        kind: VariableKind,
+        namePredicate: (String) -> Boolean
+    ): Result? {
         for (item in namedEntities) {
-            if (!actualPredicate(item.name) || !kind.typeMatches(item.type)) {
+            if (!namePredicate(item.name) || !kind.typeMatches(item.type)) {
                 continue
             }
 
